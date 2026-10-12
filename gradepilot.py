@@ -323,7 +323,7 @@ def configured_provider():
             "HF_GRADING_MODEL", "deepseek-ai/DeepSeek-R1"
         )
     if has_real_secret("GEMINI_API_KEY"):
-        return "gemini", os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        return "gemini", os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
     if has_real_secret("HF_TOKEN"):
         return "huggingface", os.environ.get(
             "HF_GRADING_MODEL", "deepseek-ai/DeepSeek-R1"
