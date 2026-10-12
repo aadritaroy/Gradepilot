@@ -317,7 +317,7 @@ def configured_provider():
 
     preferred = os.environ.get("AI_PROVIDER", "").strip().lower()
     if preferred == "gemini" and has_real_secret("GEMINI_API_KEY"):
-        return "gemini", os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+        return "gemini", os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
     if preferred in ("huggingface", "hf") and has_real_secret("HF_TOKEN"):
         return "huggingface", os.environ.get(
             "HF_GRADING_MODEL", "deepseek-ai/DeepSeek-R1"
