@@ -1,11 +1,14 @@
-from datetime import date
+import json
+from io import BytesIO
 from pathlib import Path
+import zipfile
 
 from dotenv import load_dotenv
 import pandas as pd
 import streamlit as st
 
 from gradepilot import GradePilotStore, configured_provider, group_uploads, suggest_grade
+from materials import MATERIAL_TYPES, generate_materials, material_images
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -50,17 +53,18 @@ st.markdown(
 with st.sidebar:
     st.markdown('<div class="brand">Grade<span>Pilot</span></div>', unsafe_allow_html=True)
     st.caption("Your calm, considered grading workspace")
+    st.caption("TEACHER WORKSPACE")
     page = st.radio(
         "Workspace",
-        ["Dashboard", "Assignments", "Grading inbox", "Class insights", "Settings"],
+        ["Create materials", "Grade papers", "Grade export", "Class insights", "Settings"],
         label_visibility="collapsed",
     )
     st.divider()
     if provider:
-        st.success(f"AI ready · {provider.title()}", icon="✳️")
+        st.success(f"AI connected · {provider.title()}", icon="✳️")
     else:
-        st.info("AI not configured · manual grading is ready", icon="ℹ️")
-    st.caption("Your work is saved locally on this device.")
+        st.info("Add an AI key to generate materials", icon="ℹ️")
+    st.caption("Create → Review → Enter grades in your LMS")
 
 
 def title_block(kicker, title, description):
@@ -87,128 +91,315 @@ def show_submission_list(rows):
     st.dataframe(pd.DataFrame(display), hide_index=True, use_container_width=True)
 
 
-if page == "Dashboard":
-    title_block("Teacher workspace", "Good morning. Let’s make grading lighter.",
-                "A clear view of your classes, assessment work, and what needs your attention.")
-    submissions = store.submissions()
-    insights = store.analytics()
-    pending = sum(row["status"] == "Needs review" for row in submissions)
-    assignment_list = store.assignments()
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Active assignments", len(assignment_list))
-    c2.metric("To review", pending)
-    c3.metric("Submissions saved", insights["submission_count"])
-    c4.metric(
-        "Class average",
-        f'{insights["average_score"]:.1f}' if insights["average_score"] is not None else "—",
-        help="Average of teacher-approved scores only.",
+def _assignment_paste_text(material):
+    lines = [material["title"], "", material["directions"], ""]
+    for question in material["questions"]:
+        lines.extend([
+            f"{question['number']}. {question['prompt']} ({question['points']:g} points)",
+            "",
+        ])
+    return "\n".join(lines).strip()
+
+
+def _image_download(pages, base_name):
+    if len(pages) == 1:
+        return pages[0]
+    archive = BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zipped:
+        for index, page in enumerate(pages, 1):
+            zipped.writestr(f"{base_name}-page-{index}.png", page)
+    return archive.getvalue()
+
+
+def _image_download_name(pages, base_name):
+    return f"{base_name}.png" if len(pages) == 1 else f"{base_name}-pages.zip"
+
+
+if page == "Create materials":
+    title_block(
+        "Assessment studio",
+        "Build your next assignment.",
+        "Start with the learning target or paste a rubric. Generate an assignment, worksheet, quiz, or practice quiz—with a scoring rubric and answer key.",
     )
-    st.markdown("### Your grading queue")
-    show_submission_list([row for row in submissions if row["status"] == "Needs review"][:8])
-    st.caption("AI suggestions are never counted as grades. Insights use teacher-approved scores only.")
+    if not provider:
+        st.warning(
+            "AI generation is not enabled. Add a Gemini or Hugging Face token in `.env` "
+            "to create materials. This tool does not substitute sample content."
+        )
 
-
-elif page == "Assignments":
-    title_block("Plan & organize", "Assignments", "Create assessments with a rubric, then collect each student’s work.")
-    with st.expander("＋ Create an assignment", expanded=not bool(store.assignments())):
-        with st.form("new_assignment", clear_on_submit=True):
-            left, right = st.columns(2)
-            title = left.text_input("Assignment title", placeholder="e.g. Fractions: show your thinking")
-            class_name = right.text_input("Class", placeholder="e.g. Grade 5 · Room 12")
-            subject = left.text_input("Subject", placeholder="e.g. Mathematics")
-            due_date = right.date_input("Due date", value=None)
-            max_points = left.number_input("Maximum points", min_value=1, max_value=1000, value=20)
-            rubric = st.text_area(
-                "Rubric / success criteria",
-                placeholder="List the criteria and how work will be evaluated.",
-                height=140,
-                help="This rubric is included when asking AI for a grading suggestion.",
+    with st.container(border=True):
+        with st.form("material_generator", border=False):
+            c1, c2, c3 = st.columns(3)
+            material_type = c1.selectbox("Material type", MATERIAL_TYPES)
+            subject = c2.text_input("Subject", placeholder="e.g. Grade 8 science")
+            grade_level = c3.text_input("Grade / learner level", placeholder="e.g. Grade 8")
+            c4, c5 = st.columns(2)
+            class_name = c4.text_input("Class / course (optional)", placeholder="e.g. Period 3")
+            difficulty = c5.selectbox("Difficulty", ["Foundational", "On level", "Challenge"])
+            c6, c7 = st.columns(2)
+            question_count = c6.number_input("Number of questions", min_value=1, max_value=30, value=5)
+            max_points = c7.number_input("Total points", min_value=1, max_value=200, value=20)
+            instructions = st.text_area(
+                "What should students learn or demonstrate?",
+                placeholder="Example: Assess understanding of forces and motion. Include free-body diagrams, net force, and one real-world explanation question.",
+                height=120,
             )
-            submitted = st.form_submit_button("Create assignment", type="primary")
-        if submitted:
-            missing = [label for label, value in (
-                ("title", title.strip()), ("class", class_name.strip()),
-                ("subject", subject.strip()), ("rubric", rubric.strip()),
-            ) if not value]
-            if missing:
-                st.error("Please complete: " + ", ".join(missing) + ".")
-            else:
-                store.create_assignment(
-                    title, class_name, subject,
-                    due_date.isoformat() if isinstance(due_date, date) else "",
-                    max_points, rubric,
-                )
-                st.success(f"Created “{title.strip()}”.")
-                st.rerun()
+            source_rubric = st.text_area(
+                "Optional: paste an existing rubric or scoring guide",
+                placeholder="Paste criteria here to guide the generated questions and rubric.",
+                height=100,
+            )
+            generate_clicked = st.form_submit_button(
+                "Generate assignment, rubric & answer key",
+                type="primary",
+                use_container_width=True,
+                disabled=not bool(provider),
+            )
 
+    if generate_clicked:
+        if not subject.strip() or not grade_level.strip() or not instructions.strip():
+            st.error("Add a subject, grade level, and learning target or instructions.")
+        else:
+            try:
+                with st.spinner(f"Creating {material_type.lower()} materials with {provider.title()}…"):
+                    generated = generate_materials(
+                        instructions=instructions,
+                        material_type=material_type,
+                        subject=subject,
+                        grade_level=grade_level,
+                        difficulty=difficulty,
+                        question_count=int(question_count),
+                        max_points=int(max_points),
+                        source_rubric=source_rubric,
+                        provider=provider,
+                        model=ai_model,
+                    )
+            except (RuntimeError, ValueError, KeyError, TypeError) as error:
+                st.error(f"Material generation failed: {error}")
+            else:
+                st.session_state.generated_material_package = {
+                    "material": generated,
+                    "material_type": material_type,
+                    "subject": subject.strip(),
+                    "class_name": class_name.strip() or f"{grade_level.strip()} · Materials library",
+                    "grade_level": grade_level.strip(),
+                    "difficulty": difficulty,
+                    "instructions": instructions.strip(),
+                }
+                st.session_state.generated_package_saved = False
+                st.success("Generated with AI. Review the assignment before using it.")
+
+    package = st.session_state.get("generated_material_package")
+    if package:
+        generated = package["material"]
+        st.divider()
+        st.markdown(f"## {generated['title']}")
+        st.caption(
+            f"{package['subject']} · {package['grade_level']} · "
+            f"{package['material_type']} · {generated['max_points']} points"
+        )
+        output_images = material_images(
+            generated,
+            package["subject"],
+            package["grade_level"],
+            package["material_type"],
+        )
+
+        assignment_tab, rubric_tab, key_tab = st.tabs(
+            ["Student assignment", "Rubric · image only", "Answer key · image only"]
+        )
+        with assignment_tab:
+            assignment_pages = output_images["assignment"]
+            for page_number, image_bytes in enumerate(assignment_pages, 1):
+                st.image(image_bytes, caption=f"Assignment page {page_number}", use_container_width=True)
+            st.download_button(
+                "Download assignment image(s)",
+                data=_image_download(assignment_pages, "assignment"),
+                file_name=_image_download_name(assignment_pages, "assignment"),
+                mime="image/png" if len(assignment_pages) == 1 else "application/zip",
+                use_container_width=True,
+            )
+            paste_text = _assignment_paste_text(generated)
+            st.download_button(
+                "Download paste-ready assignment text",
+                data=paste_text.encode("utf-8"),
+                file_name="assignment.txt",
+                mime="text/plain",
+                use_container_width=True,
+            )
+            st.text_area(
+                "Paste-ready assignment for Docs or Word",
+                value=paste_text,
+                height=300,
+                help="Select and copy this student-facing version. The answer key and rubric are not included.",
+            )
+        with rubric_tab:
+            rubric_pages = output_images["rubric"]
+            for page_number, image_bytes in enumerate(rubric_pages, 1):
+                st.image(image_bytes, caption=f"Rubric image {page_number}", use_container_width=True)
+            st.download_button(
+                "Download rubric image(s)",
+                data=_image_download(rubric_pages, "rubric"),
+                file_name=_image_download_name(rubric_pages, "rubric"),
+                mime="image/png" if len(rubric_pages) == 1 else "application/zip",
+                use_container_width=True,
+            )
+        with key_tab:
+            key_pages = output_images["answer_key"]
+            for page_number, image_bytes in enumerate(key_pages, 1):
+                st.image(image_bytes, caption=f"Answer key image {page_number}", use_container_width=True)
+            st.download_button(
+                "Download answer key image(s)",
+                data=_image_download(key_pages, "answer-key"),
+                file_name=_image_download_name(key_pages, "answer-key"),
+                mime="image/png" if len(key_pages) == 1 else "application/zip",
+                use_container_width=True,
+            )
+
+        if st.button(
+            "Save materials to grading library",
+            type="primary",
+            key="save_generated_materials",
+            disabled=st.session_state.get("generated_package_saved", False),
+        ):
+            rubric_for_grading = "\n".join(
+                f"{item['criterion']} ({item['points']:g} points): {item['description']}"
+                for item in generated["rubric"]
+            )
+            store.create_assignment(
+                generated["title"],
+                package["class_name"],
+                package["subject"],
+                "",
+                generated["max_points"],
+                rubric_for_grading,
+                material_type=package["material_type"],
+                instructions=package["instructions"],
+                materials_json=json.dumps(generated),
+            )
+            st.session_state.generated_package_saved = True
+            st.success("Saved. This rubric is now available in the grading workflow.")
+        elif st.session_state.get("generated_package_saved"):
+            st.caption("Saved to the grading library.")
+
+    st.divider()
+    st.markdown("### Saved assessment library")
     assignments = store.assignments()
     if assignments:
-        st.markdown("### Your assessments")
         for assignment in assignments:
-            rows = store.submissions(assignment["id"])
-            approved = sum(row["status"] == "Approved" for row in rows)
-            with st.container(border=True):
-                a, b, c = st.columns([4, 1.3, 1.5])
-                a.markdown(f"#### {assignment['title']}")
-                a.caption(f"{assignment['class_name']} · {assignment['subject']} · up to {assignment['max_points']} points")
-                if assignment["due_date"]:
-                    a.caption(f"Due {assignment['due_date']}")
-                b.metric("Submissions", len(rows))
-                c.metric("Approved", approved)
-                with st.expander("View rubric"):
-                    st.write(assignment["rubric"])
-    else:
-        st.info("Create your first assignment above. No example data is mixed into your real workspace.")
-
-    st.markdown("### Collect student work")
-    assignments = store.assignments()
-    if not assignments:
-        st.info("Create an assignment before uploading work.")
-    else:
-        with st.container(border=True):
-            assignment_by_label = {
-                f"{item['title']} · {item['class_name']} (#{item['id']})": item
-                for item in assignments
-            }
-            selected_label = st.selectbox("Assignment", list(assignment_by_label))
-            st.markdown(
-                "Upload multiple PNG, JPG, WebP, or PDF files. One file is one submission. "
-                "To group pages into a single student submission, name them "
-                "`StudentName__page1.jpg`, `StudentName__page2.jpg`."
-            )
-            uploads = st.file_uploader(
-                "Student work",
-                type=["png", "jpg", "jpeg", "webp", "pdf"],
-                accept_multiple_files=True,
-                key="submission_uploads",
-            )
-            grouped = group_uploads([
-                {"name": item.name, "mime_type": item.type, "content": item.getvalue()}
-                for item in uploads
-            ]) if uploads else {}
-            if grouped:
-                st.caption(f"{len(uploads)} file(s) will create {len(grouped)} submission(s).")
-                st.dataframe(
-                    pd.DataFrame([
-                        {"Student / group": name, "Pages / files": len(items),
-                         "Files": ", ".join(item["name"] for item in items)}
-                        for name, items in grouped.items()
-                    ]),
-                    hide_index=True,
-                    use_container_width=True,
-                )
-            if st.button("Save uploaded submissions", type="primary", disabled=not bool(grouped)):
-                try:
-                    ids = store.add_submissions(assignment_by_label[selected_label]["id"], grouped)
-                except (ValueError, OSError) as error:
-                    st.error(f"Upload not saved: {error}")
+            with st.expander(
+                f"{assignment['title']} · {assignment['material_type']} · "
+                f"{assignment['subject']} · {assignment['max_points']} pts"
+            ):
+                st.caption(assignment["class_name"])
+                if assignment["materials_json"]:
+                    try:
+                        saved_material = json.loads(assignment["materials_json"])
+                    except json.JSONDecodeError:
+                        st.error("Saved material data is unreadable.")
+                    else:
+                        saved_images = material_images(
+                            saved_material,
+                            assignment["subject"],
+                            assignment["class_name"],
+                            assignment["material_type"],
+                        )
+                        assignment_tab, rubric_tab, key_tab = st.tabs(
+                            ["Assignment", "Rubric image", "Answer key image"]
+                        )
+                        with assignment_tab:
+                            st.text_area(
+                                "Paste-ready assignment",
+                                value=_assignment_paste_text(saved_material),
+                                height=220,
+                                key=f"saved_text_{assignment['id']}",
+                            )
+                            st.download_button(
+                                "Download paste-ready assignment text",
+                                data=_assignment_paste_text(saved_material).encode("utf-8"),
+                                file_name="assignment.txt",
+                                mime="text/plain",
+                                key=f"saved_text_file_{assignment['id']}",
+                            )
+                            saved_pages = saved_images["assignment"]
+                            st.download_button(
+                                "Download assignment image(s)",
+                                data=_image_download(saved_pages, "assignment"),
+                                file_name=_image_download_name(saved_pages, "assignment"),
+                                mime="image/png" if len(saved_pages) == 1 else "application/zip",
+                                key=f"saved_assignment_{assignment['id']}",
+                            )
+                        for target_tab, asset_name, label, archive_name in (
+                            (rubric_tab, "rubric", "rubric", "rubric"),
+                            (key_tab, "answer_key", "answer key", "answer-key"),
+                        ):
+                            with target_tab:
+                                saved_pages = saved_images[asset_name]
+                                for page_number, image_bytes in enumerate(saved_pages, 1):
+                                    st.image(
+                                        image_bytes,
+                                        caption=f"{label.title()} image {page_number}",
+                                        use_container_width=True,
+                                    )
+                                st.download_button(
+                                    f"Download {label} image(s)",
+                                    data=_image_download(saved_pages, archive_name),
+                                    file_name=_image_download_name(saved_pages, archive_name),
+                                    mime="image/png" if len(saved_pages) == 1 else "application/zip",
+                                    key=f"saved_{asset_name}_{assignment['id']}",
+                                )
                 else:
-                    st.success(f"Saved {len(ids)} submission(s) with their uploaded work.")
-                    st.rerun()
+                    st.caption("Legacy assessment without saved generated materials.")
+    else:
+        st.caption("Your generated materials will appear here after you save them.")
+
+    st.divider()
+    st.markdown("### Add student work for automatic grading")
+    if not assignments:
+        st.info("Save generated materials first; their rubric will be used when grading papers.")
+    else:
+        assignment_by_label = {
+            f"{item['title']} · {item['subject']} (#{item['id']})": item
+            for item in assignments
+        }
+        selected_label = st.selectbox("Assessment", list(assignment_by_label))
+        st.caption(
+            "Each file is treated as one student submission. To group pages, use names "
+            "such as `Jordan Lee__page1.jpg` and `Jordan Lee__page2.jpg`."
+        )
+        uploads = st.file_uploader(
+            "Upload student papers",
+            type=["png", "jpg", "jpeg", "webp", "pdf"],
+            accept_multiple_files=True,
+            key="submission_uploads",
+        )
+        grouped = group_uploads([
+            {"name": item.name, "mime_type": item.type, "content": item.getvalue()}
+            for item in uploads
+        ]) if uploads else {}
+        if grouped:
+            st.caption(f"{len(uploads)} file(s) · {len(grouped)} student submission(s)")
+            st.dataframe(
+                pd.DataFrame([
+                    {"Student / group": name, "Pages": len(items),
+                     "Files": ", ".join(item["name"] for item in items)}
+                    for name, items in grouped.items()
+                ]),
+                hide_index=True,
+                use_container_width=True,
+            )
+        if st.button("Save papers to grading queue", type="primary", disabled=not bool(grouped)):
+            try:
+                ids = store.add_submissions(assignment_by_label[selected_label]["id"], grouped)
+            except (ValueError, OSError) as error:
+                st.error(f"Upload not saved: {error}")
+            else:
+                st.success(f"Added {len(ids)} student submission(s) to the grading queue.")
+                st.rerun()
 
 
-elif page == "Grading inbox":
-    title_block("Review & decide", "Grading inbox", "See student work, use an AI suggestion when configured, and approve the grade yourself.")
+elif page == "Grade papers":
+    title_block("Teacher review", "Grade papers", "AI prepares a rubric-based draft. You review and approve every final score.")
     all_rows = store.submissions()
     filter_col, assignment_col = st.columns([1, 2])
     status_filter = filter_col.selectbox("Status", ["Needs review", "Approved", "All"])
@@ -325,6 +516,39 @@ elif page == "Grading inbox":
                     )
                     st.caption(entry["changed_at"])
                     st.write(entry["feedback"])
+
+
+elif page == "Grade export":
+    title_block(
+        "Manual LMS entry",
+        "Approved grades",
+        "Review approved scores in one place, then download a simple CSV to use while entering grades in Canvas or another LMS.",
+    )
+    approved_rows = [
+        row for row in store.submissions()
+        if row["status"] == "Approved" and row["final_score"] is not None
+    ]
+    if not approved_rows:
+        st.info("No teacher-approved grades yet. Review work in Grade papers first.")
+    else:
+        export_data = [{
+            "Student": row["student_name"],
+            "Assignment": row["assignment_title"],
+            "Class": row["class_name"],
+            "Score": row["final_score"],
+            "Out of": row["max_points"],
+            "Feedback": row["final_feedback"] or "",
+        } for row in approved_rows]
+        export_frame = pd.DataFrame(export_data)
+        st.dataframe(export_frame, hide_index=True, use_container_width=True)
+        st.download_button(
+            "Download approved grades CSV",
+            data=export_frame.to_csv(index=False).encode("utf-8-sig"),
+            file_name="gradepilot-approved-grades.csv",
+            mime="text/csv",
+            type="primary",
+        )
+        st.caption("This file is for teacher reference and manual LMS entry; it does not write grades into Canvas.")
 
 
 elif page == "Class insights":
