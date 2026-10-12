@@ -320,13 +320,13 @@ def configured_provider():
         return "gemini", os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
     if preferred in ("huggingface", "hf") and has_real_secret("HF_TOKEN"):
         return "huggingface", os.environ.get(
-            "HF_GRADING_MODEL", "meta-llama/Meta-Llama-3-8B-Instruct"
+            "HF_GRADING_MODEL", "deepseek-ai/DeepSeek-R1"
         )
     if has_real_secret("GEMINI_API_KEY"):
         return "gemini", os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
     if has_real_secret("HF_TOKEN"):
         return "huggingface", os.environ.get(
-            "HF_GRADING_MODEL", "meta-llama/Meta-Llama-3-8B-Instruct"
+            "HF_GRADING_MODEL", "deepseek-ai/DeepSeek-R1"
         )
     return None, None
 
